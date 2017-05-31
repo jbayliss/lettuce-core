@@ -60,7 +60,8 @@ import io.netty.util.concurrent.ImmediateEventExecutor;
 @RunWith(MockitoJUnitRunner.class)
 public class CommandHandlerTest {
 
-    private Queue<RedisCommand<String, String, ?>> q = new ArrayDeque<>(10);
+    private Queue<RedisCommand<String, String, ?>> queue;
+    private Queue<RedisCommand<String, String, ?>> stack;
 
     private CommandHandler<String, String> sut;
 
@@ -121,18 +122,22 @@ public class CommandHandlerTest {
         when(channel.writeAndFlush(any(), any(ChannelPromise.class))).thenAnswer(invocation -> {
 
             if (invocation.getArguments()[0] instanceof RedisCommand) {
-                q.add((RedisCommand) invocation.getArguments()[0]);
+                queue.remove((RedisCommand) invocation.getArguments()[0]);
+                stack.add((RedisCommand) invocation.getArguments()[0]);
             }
 
             if (invocation.getArguments()[0] instanceof Collection) {
-                q.addAll((Collection) invocation.getArguments()[0]);
+                queue.removeAll((Collection) invocation.getArguments()[0]);
+                stack.addAll((Collection) invocation.getArguments()[0]);
             }
 
             return null;
         });
 
-        sut = new CommandHandler<>(ClientOptions.create(), clientResources, q);
+        sut = new CommandHandler<>(ClientOptions.create(), clientResources);
         sut.setRedisChannelHandler(channelHandler);
+        queue = (Queue) ReflectionTestUtils.getField(sut, "queue");
+        stack = (Queue) ReflectionTestUtils.getField(sut, "stack");
     }
 
     @Test
@@ -150,7 +155,7 @@ public class CommandHandlerTest {
 
         ClientOptions clientOptions = ClientOptions.builder().cancelCommandsOnReconnectFailure(true).build();
 
-        sut = new CommandHandler<>(clientOptions, clientResources, q);
+        sut = new CommandHandler<>(clientOptions, clientResources);
         sut.setRedisChannelHandler(channelHandler);
 
         sut.channelRegistered(context);
@@ -175,7 +180,7 @@ public class CommandHandlerTest {
 
         Command<String, String, String> pingCommand = new Command<>(CommandType.PING,
                 new StatusOutput<>(new Utf8StringCodec()), null);
-        q.add(bufferedCommand);
+        queue.add(bufferedCommand);
 
         AtomicLong atomicLong = (AtomicLong) ReflectionTestUtils.getField(sut, "writers");
         doAnswer(new Answer() {
@@ -197,7 +202,7 @@ public class CommandHandlerTest {
 
         assertThat(atomicLong.get()).isEqualTo(0);
         assertThat(ReflectionTestUtils.getField(sut, "exclusiveLockOwner")).isNull();
-        assertThat(q).containsSequence(pingCommand, bufferedCommand);
+        assertThat(stack).containsSequence(pingCommand, bufferedCommand);
 
         verify(pipeline).fireUserEventTriggered(any(ConnectionEvents.Activated.class));
     }
@@ -217,12 +222,11 @@ public class CommandHandlerTest {
         Command<String, String, String> queuedCommand2 = new Command<>(CommandType.AUTH, new StatusOutput<>(
                 new Utf8StringCodec()), null);
 
-        q.add(queuedCommand1);
-        q.add(queuedCommand2);
+        queue.add(queuedCommand1);
+        queue.add(queuedCommand2);
 
-        Collection buffer = (Collection) ReflectionTestUtils.getField(sut, "commandBuffer");
-        buffer.add(bufferedCommand1);
-        buffer.add(bufferedCommand2);
+        queue.add(bufferedCommand1);
+        queue.add(bufferedCommand2);
 
         reset(channel);
         when(channel.newPromise()).thenAnswer(invocation -> new DefaultChannelPromise(channel));
@@ -231,9 +235,6 @@ public class CommandHandlerTest {
 
         sut.channelRegistered(context);
         sut.channelActive(context);
-
-        assertThat(q).isEmpty();
-        assertThat(buffer).isEmpty();
 
         ArgumentCaptor<Object> objectArgumentCaptor = ArgumentCaptor.forClass(Object.class);
         verify(channel).writeAndFlush(objectArgumentCaptor.capture(), any(ChannelPromise.class));
@@ -257,18 +258,17 @@ public class CommandHandlerTest {
         Command<String, String, String> queuedCommand2 = new Command<>(CommandType.AUTH, new StatusOutput<>(
                 new Utf8StringCodec()), null);
 
-        q.add(queuedCommand1);
-        q.add(queuedCommand2);
+        queue.add(queuedCommand1);
+        queue.add(queuedCommand2);
 
-        Collection buffer = (Collection) ReflectionTestUtils.getField(sut, "commandBuffer");
-        buffer.add(bufferedCommand1);
-        buffer.add(bufferedCommand2);
+        queue.add(bufferedCommand1);
+        queue.add(bufferedCommand2);
 
         sut.channelRegistered(context);
         sut.channelActive(context);
 
-        assertThat(q).containsSequence(queuedCommand1, queuedCommand2, bufferedCommand1, bufferedCommand2);
-        assertThat(buffer).isEmpty();
+        assertThat(stack).containsSequence(queuedCommand1, queuedCommand2, bufferedCommand1, bufferedCommand2);
+        assertThat(queue).isEmpty();
     }
 
     @Test
@@ -302,14 +302,13 @@ public class CommandHandlerTest {
 
         sut.write(command);
 
-        Collection buffer = (Collection) ReflectionTestUtils.getField(sut, "commandBuffer");
-        assertThat(buffer).containsOnly(command);
+        assertThat(queue).containsOnly(command);
     }
 
     @Test(expected = RedisException.class)
     public void testWriteChannelDisconnectedWithoutReconnect() throws Exception {
 
-        sut = new CommandHandler<>(ClientOptions.builder().autoReconnect(false).build(), clientResources, q);
+        sut = new CommandHandler<>(ClientOptions.builder().autoReconnect(false).build(), clientResources);
         sut.setRedisChannelHandler(channelHandler);
 
         when(channel.isActive()).thenReturn(true);
@@ -331,15 +330,15 @@ public class CommandHandlerTest {
     @Test
     public void testExceptionWithQueue() throws Exception {
         sut.setState(CommandHandler.LifecycleState.ACTIVE);
-        q.clear();
+        queue.clear();
 
         sut.channelActive(context);
         when(channel.isActive()).thenReturn(true);
 
-        q.add(command);
+        stack.add(command);
         sut.exceptionCaught(context, new Exception());
 
-        assertThat(q).isEmpty();
+        assertThat(stack).isEmpty();
         command.get();
 
         assertThat(ReflectionTestUtils.getField(command, "exception")).isNotNull();
@@ -432,7 +431,7 @@ public class CommandHandlerTest {
         sut.write(context, command, null);
 
         verifyZeroInteractions(context);
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).isEmpty();
+        assertThat(queue).isEmpty();
     }
 
     @Test
@@ -451,7 +450,7 @@ public class CommandHandlerTest {
             assertThat(e).isSameAs(exception);
         }
 
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).isEmpty();
+        assertThat(queue).isEmpty();
         verify(commandMock).completeExceptionally(exception);
     }
 
@@ -471,7 +470,7 @@ public class CommandHandlerTest {
             assertThat(e).isSameAs(exception);
         }
 
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).isEmpty();
+        assertThat(queue).isEmpty();
         verify(commandMock).completeExceptionally(exception);
     }
 
@@ -481,8 +480,7 @@ public class CommandHandlerTest {
         sut.write(context, command, null);
 
         verify(context).write(command, null);
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).hasSize(1).allMatch(
-                o -> o instanceof LatencyMeteredCommand);
+        assertThat(stack).hasSize(1).allMatch(o -> o instanceof LatencyMeteredCommand);
     }
 
     @Test
@@ -492,7 +490,7 @@ public class CommandHandlerTest {
         sut.write(context, Arrays.asList(command), null);
 
         verifyZeroInteractions(context);
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).isEmpty();
+        assertThat(queue).isEmpty();
     }
 
     @Test
@@ -502,7 +500,7 @@ public class CommandHandlerTest {
         sut.write(context, commands, null);
 
         verify(context).write(commands, null);
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).hasSize(1);
+        assertThat(stack).hasSize(1);
     }
 
     @Test
@@ -520,8 +518,7 @@ public class CommandHandlerTest {
         verify(context).write(captor.capture(), any());
 
         assertThat(captor.getValue()).containsOnly(command2);
-        assertThat((Collection) ReflectionTestUtils.getField(sut, "queue")).hasSize(1)
-                .allMatch(o -> o instanceof LatencyMeteredCommand)
+        assertThat(stack).hasSize(1).allMatch(o -> o instanceof LatencyMeteredCommand)
                 .allMatch(o -> CommandWrapper.unwrap((RedisCommand) o) == command2);
     }
 
@@ -538,17 +535,17 @@ public class CommandHandlerTest {
 
     @Test
     public void testMTCConcurrentWriteThenReset() throws Throwable {
-        TestFramework.runOnce(new MTCConcurrentWriteThenReset(clientResources, q, command));
+        TestFramework.runOnce(new MTCConcurrentWriteThenReset(clientResources, command));
     }
 
     @Test
     public void testMTCConcurrentResetThenWrite() throws Throwable {
-        TestFramework.runOnce(new MTCConcurrentResetThenWrite(clientResources, q, command));
+        TestFramework.runOnce(new MTCConcurrentResetThenWrite(clientResources, command));
     }
 
     @Test
     public void testMTCConcurrentConcurrentWrite() throws Throwable {
-        TestFramework.runOnce(new MTCConcurrentConcurrentWrite(clientResources, q, command));
+        TestFramework.runOnce(new MTCConcurrentConcurrentWrite(clientResources, command));
     }
 
     /**
@@ -562,10 +559,9 @@ public class CommandHandlerTest {
         private List<Thread> entryThreadOrder = Collections.synchronizedList(new ArrayList<>());
         private List<Thread> exitThreadOrder = Collections.synchronizedList(new ArrayList<>());
 
-        public MTCConcurrentWriteThenReset(ClientResources clientResources, Queue<RedisCommand<String, String, ?>> queue,
-                Command<String, String, String> command) {
+        public MTCConcurrentWriteThenReset(ClientResources clientResources, Command<String, String, String> command) {
             this.command = command;
-            handler = new TestableCommandHandler(ClientOptions.create(), clientResources, queue) {
+            handler = new TestableCommandHandler(ClientOptions.create(), clientResources) {
 
                 @Override
                 protected void incrementWriters() {
@@ -583,10 +579,10 @@ public class CommandHandlerTest {
                 }
 
                 @Override
-                protected <C extends RedisCommand<String, String, T>, T> void writeToBuffer(C command) {
+                protected <C extends RedisCommand<String, String, T>, T> void disconnectedBufferCommand(C command) {
 
                     entryThreadOrder.add(Thread.currentThread());
-                    super.writeToBuffer(command);
+                    super.disconnectedBufferCommand(command);
                 }
 
                 @Override
@@ -646,10 +642,9 @@ public class CommandHandlerTest {
         private List<Thread> entryThreadOrder = Collections.synchronizedList(new ArrayList<>());
         private List<Thread> exitThreadOrder = Collections.synchronizedList(new ArrayList<>());
 
-        public MTCConcurrentResetThenWrite(ClientResources clientResources, Queue<RedisCommand<String, String, ?>> queue,
-                Command<String, String, String> command) {
+        public MTCConcurrentResetThenWrite(ClientResources clientResources, Command<String, String, String> command) {
             this.command = command;
-            handler = new TestableCommandHandler(ClientOptions.create(), clientResources, queue) {
+            handler = new TestableCommandHandler(ClientOptions.create(), clientResources) {
 
                 @Override
                 protected void incrementWriters() {
@@ -667,10 +662,10 @@ public class CommandHandlerTest {
                 }
 
                 @Override
-                protected <C extends RedisCommand<String, String, T>, T> void writeToBuffer(C command) {
+                protected <C extends RedisCommand<String, String, T>, T> void disconnectedBufferCommand(C command) {
 
                     entryThreadOrder.add(Thread.currentThread());
-                    super.writeToBuffer(command);
+                    super.disconnectedBufferCommand(command);
                 }
 
                 @Override
@@ -726,18 +721,17 @@ public class CommandHandlerTest {
         private final Command<String, String, String> command;
         private TestableCommandHandler handler;
 
-        public MTCConcurrentConcurrentWrite(ClientResources clientResources, Queue<RedisCommand<String, String, ?>> queue,
-                Command<String, String, String> command) {
+        public MTCConcurrentConcurrentWrite(ClientResources clientResources, Command<String, String, String> command) {
             this.command = command;
-            handler = new TestableCommandHandler(ClientOptions.create(), clientResources, queue) {
+            handler = new TestableCommandHandler(ClientOptions.create(), clientResources) {
 
                 @Override
-                protected <C extends RedisCommand<String, String, T>, T> void writeToBuffer(C command) {
+                protected <C extends RedisCommand<String, String, T>, T> void disconnectedBufferCommand(C command) {
 
                     waitForTick(2);
                     assertThat(writers.get()).isEqualTo(2);
                     waitForTick(3);
-                    super.writeToBuffer(command);
+                    super.disconnectedBufferCommand(command);
                 }
 
             };
@@ -758,9 +752,8 @@ public class CommandHandlerTest {
     }
 
     static class TestableCommandHandler extends CommandHandler<String, String> {
-        public TestableCommandHandler(ClientOptions clientOptions, ClientResources clientResources,
-                Queue<RedisCommand<String, String, ?>> queue) {
-            super(clientOptions, clientResources, queue);
+        public TestableCommandHandler(ClientOptions clientOptions, ClientResources clientResources) {
+            super(clientOptions, clientResources);
         }
     }
 

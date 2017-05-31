@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2016 the original author or authors.
+ * Copyright 2011-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,35 +25,23 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
-import com.lambdaworks.Connections;
-import io.netty.handler.codec.EncoderException;
-import io.netty.util.Version;
 import org.junit.Before;
 import org.junit.Test;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import com.lambdaworks.Connections;
 import com.lambdaworks.Wait;
-import com.lambdaworks.redis.AbstractRedisClientTest;
-import com.lambdaworks.redis.ClientOptions;
-import com.lambdaworks.redis.RedisAsyncConnection;
-import com.lambdaworks.redis.RedisChannelHandler;
-import com.lambdaworks.redis.RedisChannelWriter;
-import com.lambdaworks.redis.RedisCommandTimeoutException;
-import com.lambdaworks.redis.RedisConnection;
-import com.lambdaworks.redis.RedisException;
-import com.lambdaworks.redis.RedisFuture;
+import com.lambdaworks.redis.*;
 import com.lambdaworks.redis.api.sync.RedisCommands;
 import com.lambdaworks.redis.codec.Utf8StringCodec;
 import com.lambdaworks.redis.output.IntegerOutput;
 import com.lambdaworks.redis.output.StatusOutput;
-import com.lambdaworks.redis.protocol.AsyncCommand;
-import com.lambdaworks.redis.protocol.Command;
-import com.lambdaworks.redis.protocol.CommandArgs;
-import com.lambdaworks.redis.protocol.CommandType;
-import com.lambdaworks.redis.protocol.ConnectionWatchdog;
+import com.lambdaworks.redis.protocol.*;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
+import io.netty.handler.codec.EncoderException;
+import io.netty.util.Version;
 
 /**
  * @author Mark Paluch
@@ -172,7 +160,8 @@ public class AtLeastOnceTest extends AbstractRedisClientTest {
 
         assertThat(verificationConnection.get(key)).isEqualTo("2");
 
-        assertThat(getQueue(getRedisChannelHandler(connection))).isNotEmpty();
+        assertThat(getStack(getRedisChannelHandler(connection))).isNotEmpty();
+        assertThat(getQueue(getRedisChannelHandler(connection))).isEmpty();
 
         connection.close();
     }
@@ -328,8 +317,8 @@ public class AtLeastOnceTest extends AbstractRedisClientTest {
 
         assertThat(verificationConnection.get("key")).isEqualTo("1");
 
-        assertThat(getQueue(getRedisChannelHandler(connection))).isEmpty();
-        assertThat(getCommandBuffer(getRedisChannelHandler(connection)).size()).isGreaterThan(0);
+        assertThat(getStack(getRedisChannelHandler(connection))).isEmpty();
+        assertThat(getQueue(getRedisChannelHandler(connection)).size()).isGreaterThan(0);
 
         connectionWatchdog.setListenOnChannelInactive(true);
         connectionWatchdog.scheduleReconnect();
@@ -366,8 +355,9 @@ public class AtLeastOnceTest extends AbstractRedisClientTest {
 
         assertThat(verificationConnection.get("key")).isEqualTo("1");
 
-        assertThat(getQueue(redisChannelHandler)).isEmpty();
-        assertThat(getCommandBuffer(redisChannelHandler).size()).isGreaterThan(0);
+        assertThat(getStack(redisChannelHandler)).isEmpty();
+        assertThat(getQueue(redisChannelHandler)).isNotEmpty();
+        assertThat(getCommandBuffer(redisChannelHandler)).isEmpty();
 
         connectionWatchdog.setListenOnChannelInactive(true);
         connectionWatchdog.scheduleReconnect();
@@ -415,6 +405,10 @@ public class AtLeastOnceTest extends AbstractRedisClientTest {
 
     private Queue<Object> getCommandBuffer(RedisChannelHandler<?, ?> channelHandler) {
         return (Queue<Object>) ReflectionTestUtils.getField(channelHandler.getChannelWriter(), "commandBuffer");
+    }
+
+    private Queue<Object> getStack(RedisChannelHandler<?, ?> channelHandler) {
+        return (Queue<Object>) ReflectionTestUtils.getField(channelHandler.getChannelWriter(), "stack");
     }
 
     private String getConnectionState(RedisChannelHandler<?, ?> channelHandler) {

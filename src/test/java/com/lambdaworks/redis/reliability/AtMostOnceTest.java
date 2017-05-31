@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2016 the original author or authors.
+ * Copyright 2011-2017 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -155,8 +155,8 @@ new Command<>(CommandType.INCR,
         assertThat(command.await(2, TimeUnit.SECONDS)).isTrue();
         assertThat(command.isCancelled()).isFalse();
         assertThat(getException(command)).isInstanceOf(EncoderException.class);
-        assertThat(getQueue(getRedisChannelHandler(connection))).isNotEmpty();
-        getQueue(getRedisChannelHandler(connection)).clear();
+        assertThat(getStack(getRedisChannelHandler(connection))).isNotEmpty();
+        getStack(getRedisChannelHandler(connection)).clear();
 
         assertThat(connection.get(key)).isEqualTo("2");
 
@@ -301,6 +301,10 @@ new Command<>(CommandType.INCR,
 
     private Queue<?> getCommandBuffer(RedisChannelHandler<?, ?> channelHandler) {
         return (Queue<?>) ReflectionTestUtils.getField(channelHandler.getChannelWriter(), "commandBuffer");
+    }
+
+    private Queue<Object> getStack(RedisChannelHandler<?, ?> channelHandler) {
+        return (Queue<Object>) ReflectionTestUtils.getField(channelHandler.getChannelWriter(), "stack");
     }
 
     private String getConnectionState(RedisChannelHandler<?, ?> channelHandler) {
